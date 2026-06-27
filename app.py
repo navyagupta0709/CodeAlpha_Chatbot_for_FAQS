@@ -1,17 +1,30 @@
 import streamlit as st
-import cv2
+import nltk
 import numpy as np
-from ultralytics import YOLO
-import tempfile
-import os
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
+import re
 import time
-from collections import defaultdict
+from faq_data import faqs
+
+# ─── Download NLTK data ────────────────────────────────────────────────────────
+@st.cache_resource
+def download_nltk():
+    nltk.download('punkt', quiet=True)
+    nltk.download('stopwords', quiet=True)
+    nltk.download('wordnet', quiet=True)
+    nltk.download('punkt_tab', quiet=True)
+
+download_nltk()
+
+from nltk.corpus import stopwords
+from nltk.stem import WordNetLemmatizer
 
 # ─── Page Config ───────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="VisionAI — Object Detection & Tracking",
-    page_icon="👁️",
-    layout="wide"
+    page_title="AskAI — FAQ Chatbot",
+    page_icon="🤖",
+    layout="centered"
 )
 
 # ─── CSS ───────────────────────────────────────────────────────────────────────
@@ -20,366 +33,315 @@ st.markdown("""
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Space+Grotesk:wght@500;700&display=swap');
 
 html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
-.stApp { background: #080b14; }
+.stApp { background: #0d1117; min-height: 100vh; }
 #MainMenu, footer, header { visibility: hidden; }
-.block-container { padding: 1.5rem 2rem; }
+.block-container { padding-top: 1.5rem; padding-bottom: 2rem; max-width: 780px; }
 
+/* Hero */
 .hero {
-    padding: 1.5rem 0 1rem;
+    text-align: center;
+    padding: 2rem 1rem 1rem;
     border-bottom: 1px solid rgba(255,255,255,0.06);
     margin-bottom: 1.5rem;
 }
 .hero h1 {
     font-family: 'Space Grotesk', sans-serif;
-    font-size: 2rem;
+    font-size: 2.2rem;
     font-weight: 700;
     color: #fff;
-    margin: 0;
+    margin-bottom: 0.3rem;
 }
-.hero h1 .acc { color: #f97316; }
-.hero p { color: #64748b; font-size: 0.87rem; margin-top: 0.3rem; }
+.hero h1 .accent { color: #22d3ee; }
+.hero p { color: #64748b; font-size: 0.9rem; }
 .badge {
     display: inline-block;
-    background: rgba(249,115,22,0.1);
-    color: #f97316;
-    border: 1px solid rgba(249,115,22,0.2);
+    background: rgba(34, 211, 238, 0.1);
+    color: #22d3ee;
+    border: 1px solid rgba(34, 211, 238, 0.2);
     border-radius: 20px;
-    padding: 0.18rem 0.75rem;
-    font-size: 0.68rem;
+    padding: 0.2rem 0.8rem;
+    font-size: 0.7rem;
     font-weight: 600;
     letter-spacing: 1px;
-    margin-bottom: 0.7rem;
+    margin-bottom: 0.8rem;
 }
 
-/* Panel */
-.panel {
-    background: rgba(255,255,255,0.03);
-    border: 1px solid rgba(255,255,255,0.07);
-    border-radius: 14px;
-    padding: 1.4rem;
+/* Chat Container */
+.chat-container {
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
     margin-bottom: 1rem;
 }
-.panel-title {
-    color: #94a3b8;
-    font-size: 0.72rem;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 1.2px;
-    margin-bottom: 0.9rem;
-}
 
-/* Metric cards */
-.metrics-row { display: flex; gap: 0.7rem; flex-wrap: wrap; margin-bottom: 1rem; }
-.metric-card {
-    flex: 1; min-width: 100px;
-    background: rgba(249,115,22,0.07);
-    border: 1px solid rgba(249,115,22,0.15);
-    border-radius: 10px;
-    padding: 0.75rem 1rem;
-    text-align: center;
+/* User Message */
+.msg-user {
+    display: flex;
+    justify-content: flex-end;
+    align-items: flex-start;
+    gap: 0.6rem;
 }
-.metric-val {
-    font-family: 'Space Grotesk', sans-serif;
-    font-size: 1.6rem;
-    font-weight: 700;
-    color: #f97316;
-    line-height: 1;
-}
-.metric-lbl { color: #64748b; font-size: 0.72rem; margin-top: 0.2rem; }
-
-/* Object tags */
-.obj-tag {
-    display: inline-block;
-    background: rgba(249,115,22,0.1);
-    border: 1px solid rgba(249,115,22,0.2);
-    color: #fed7aa;
-    border-radius: 6px;
-    padding: 0.2rem 0.6rem;
-    font-size: 0.75rem;
-    margin: 0.15rem;
-}
-
-/* Progress legend */
-.legend-item { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.4rem; }
-.legend-dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
-
-/* Info box */
-.info-box {
-    background: rgba(14,165,233,0.07);
-    border: 1px solid rgba(14,165,233,0.15);
-    border-radius: 10px;
-    padding: 0.8rem 1rem;
-    color: #7dd3fc;
-    font-size: 0.82rem;
+.bubble-user {
+    background: linear-gradient(135deg, #0ea5e9, #22d3ee);
+    color: #fff;
+    border-radius: 18px 18px 4px 18px;
+    padding: 0.75rem 1.1rem;
+    max-width: 75%;
+    font-size: 0.92rem;
     line-height: 1.5;
+    box-shadow: 0 2px 12px rgba(14,165,233,0.25);
+}
+.avatar-user {
+    width: 32px; height: 32px;
+    background: #0ea5e9;
+    border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 0.85rem;
+    flex-shrink: 0;
+    margin-top: 2px;
 }
 
-.footer { text-align:center; color:#1e293b; font-size:0.72rem; margin-top:2rem; padding-bottom:1rem; }
+/* Bot Message */
+.msg-bot {
+    display: flex;
+    justify-content: flex-start;
+    align-items: flex-start;
+    gap: 0.6rem;
+}
+.bubble-bot {
+    background: rgba(255,255,255,0.04);
+    border: 1px solid rgba(255,255,255,0.08);
+    color: #e2e8f0;
+    border-radius: 18px 18px 18px 4px;
+    padding: 0.75rem 1.1rem;
+    max-width: 80%;
+    font-size: 0.92rem;
+    line-height: 1.6;
+}
+.avatar-bot {
+    width: 32px; height: 32px;
+    background: rgba(34,211,238,0.15);
+    border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 0.9rem;
+    flex-shrink: 0;
+    margin-top: 2px;
+}
+.confidence-bar {
+    margin-top: 0.5rem;
+    padding-top: 0.5rem;
+    border-top: 1px solid rgba(255,255,255,0.06);
+    font-size: 0.72rem;
+    color: #64748b;
+}
+.conf-fill {
+    display: inline-block;
+    height: 3px;
+    border-radius: 2px;
+    background: #22d3ee;
+    vertical-align: middle;
+    margin: 0 0.4rem;
+}
+
+/* Welcome message */
+.welcome-box {
+    background: rgba(34,211,238,0.05);
+    border: 1px solid rgba(34,211,238,0.15);
+    border-radius: 12px;
+    padding: 1.2rem 1.4rem;
+    color: #94a3b8;
+    font-size: 0.88rem;
+    line-height: 1.6;
+    margin-bottom: 1rem;
+}
+.welcome-box strong { color: #22d3ee; }
+
+/* Suggestion chips */
+.chips { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-bottom: 1.2rem; }
+.chip {
+    background: rgba(255,255,255,0.05);
+    border: 1px solid rgba(255,255,255,0.1);
+    border-radius: 20px;
+    padding: 0.3rem 0.85rem;
+    color: #94a3b8;
+    font-size: 0.77rem;
+    cursor: pointer;
+}
+
+/* Low confidence */
+.low-conf {
+    background: rgba(251,146,60,0.08);
+    border: 1px solid rgba(251,146,60,0.2);
+    color: #fb923c;
+    border-radius: 8px;
+    padding: 0.5rem 0.8rem;
+    font-size: 0.82rem;
+    margin-top: 0.4rem;
+}
+
+/* Footer */
+.footer { text-align:center; color: #334155; font-size:0.73rem; margin-top:2rem; }
 </style>
 """, unsafe_allow_html=True)
+
+# ─── NLP Pipeline ──────────────────────────────────────────────────────────────
+@st.cache_resource
+def build_nlp_engine():
+    lemmatizer = WordNetLemmatizer()
+    stop_words = set(stopwords.words('english'))
+
+    def preprocess(text):
+        text = text.lower()
+        text = re.sub(r'[^a-z0-9\s]', '', text)
+        tokens = nltk.word_tokenize(text)
+        tokens = [lemmatizer.lemmatize(t) for t in tokens if t not in stop_words]
+        return ' '.join(tokens)
+
+    questions = [f["question"] for f in faqs]
+    processed = [preprocess(q) for q in questions]
+
+    vectorizer = TfidfVectorizer(ngram_range=(1, 2))
+    tfidf_matrix = vectorizer.fit_transform(processed)
+
+    return vectorizer, tfidf_matrix, preprocess
+
+vectorizer, tfidf_matrix, preprocess = build_nlp_engine()
+
+def get_answer(user_query, threshold=0.15):
+    processed_q = preprocess(user_query)
+    query_vec = vectorizer.transform([processed_q])
+    similarities = cosine_similarity(query_vec, tfidf_matrix).flatten()
+    best_idx = int(np.argmax(similarities))
+    best_score = float(similarities[best_idx])
+
+    if best_score < threshold:
+        return None, best_score, None
+
+    return faqs[best_idx]["answer"], best_score, faqs[best_idx]["question"]
+
+# ─── Init session ─────────────────────────────────────────────────────────────
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+if "input_key" not in st.session_state:
+    st.session_state.input_key = 0
 
 # ─── Hero ─────────────────────────────────────────────────────────────────────
 st.markdown("""
 <div class="hero">
-    <div class="badge">YOLOV8 · REAL-TIME TRACKING · OPENCV</div>
-    <h1>Vision<span class="acc">AI</span></h1>
-    <p>Real-time object detection & tracking · Upload a video or image · Powered by YOLOv8</p>
+    <div class="badge">NLP POWERED · COSINE SIMILARITY</div>
+    <h1>Ask<span class="accent">AI</span></h1>
+    <p>Your intelligent FAQ assistant for Artificial Intelligence topics</p>
 </div>
 """, unsafe_allow_html=True)
 
-# ─── Load Model ───────────────────────────────────────────────────────────────
-@st.cache_resource
-def load_model(model_size):
-    return YOLO(f"yolov8{model_size}.pt")
-
-# ─── Layout: Left Controls | Right Output ─────────────────────────────────────
-col_ctrl, col_out = st.columns([1, 2.5])
-
-with col_ctrl:
-    st.markdown('<div class="panel">', unsafe_allow_html=True)
-    st.markdown('<div class="panel-title">⚙️ Settings</div>', unsafe_allow_html=True)
-
-    model_size = st.select_slider(
-        "Model Size",
-        options=["n", "s", "m"],
-        value="n",
-        help="n=Nano(fast), s=Small(balanced), m=Medium(accurate)"
-    )
-    size_label = {"n": "Nano — Fastest", "s": "Small — Balanced", "m": "Medium — Accurate"}
-    st.caption(f"Selected: {size_label[model_size]}")
-
-    conf_threshold = st.slider("Confidence Threshold", 0.1, 0.9, 0.4, 0.05)
-    iou_threshold = st.slider("IoU Threshold (NMS)", 0.1, 0.9, 0.5, 0.05)
-    enable_tracking = st.toggle("Enable Object Tracking", value=True)
-    show_labels = st.toggle("Show Labels", value=True)
-    show_conf = st.toggle("Show Confidence", value=True)
-    st.markdown('</div>', unsafe_allow_html=True)
-
-    st.markdown('<div class="panel">', unsafe_allow_html=True)
-    st.markdown('<div class="panel-title">📂 Input Source</div>', unsafe_allow_html=True)
-    input_mode = st.radio("", ["🖼️ Image", "🎬 Video"], horizontal=True, label_visibility="collapsed")
-    st.markdown('</div>', unsafe_allow_html=True)
-
+# ─── Welcome / Suggestions ────────────────────────────────────────────────────
+if not st.session_state.messages:
     st.markdown("""
-    <div class="info-box">
-        ℹ️ <strong>YOLOv8</strong> detects 80 COCO classes: people, vehicles, animals, everyday objects and more.<br><br>
-        Tracking assigns persistent IDs to objects across video frames using ByteTrack.
+    <div class="welcome-box">
+        👋 Hi! I'm <strong>AskAI</strong>, your AI knowledge assistant.<br>
+        I can answer questions on <strong>Machine Learning, Deep Learning, NLP, Neural Networks</strong> and more.<br>
+        Try one of the suggestions below or type your own question!
     </div>
     """, unsafe_allow_html=True)
 
-with col_out:
-    model = load_model(model_size)
-
-    # ─── COCO color palette ───────────────────────────────────────────────────
-    np.random.seed(42)
-    COLORS = np.random.randint(50, 230, size=(80, 3), dtype=np.uint8)
-
-    def process_image(img_array, conf, iou):
-        results = model(img_array, conf=conf, iou=iou, verbose=False)[0]
-        annotated = img_array.copy()
-        detections = []
-
-        for box in results.boxes:
-            cls_id = int(box.cls[0])
-            label = model.names[cls_id]
-            confidence = float(box.conf[0])
-            x1, y1, x2, y2 = map(int, box.xyxy[0])
-            color = tuple(int(c) for c in COLORS[cls_id % 80])
-
-            cv2.rectangle(annotated, (x1, y1), (x2, y2), color, 2)
-
-            if show_labels:
-                display_text = f"{label}"
-                if show_conf:
-                    display_text += f" {confidence:.0%}"
-                (tw, th), _ = cv2.getTextSize(display_text, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 1)
-                cv2.rectangle(annotated, (x1, y1 - th - 8), (x1 + tw + 4, y1), color, -1)
-                cv2.putText(annotated, display_text, (x1 + 2, y1 - 4),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1)
-
-            detections.append({"label": label, "confidence": confidence,
-                                "bbox": (x1, y1, x2 - x1, y2 - y1)})
-
-        return annotated, detections
-
-    def process_video(video_path, conf, iou, tracking):
-        cap = cv2.VideoCapture(video_path)
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        fps = cap.get(cv2.CAP_PROP_FPS) or 25
-
-        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-
-        out_path = tempfile.mktemp(suffix=".mp4")
-        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-        out = cv2.VideoWriter(out_path, fourcc, fps, (width, height))
-
-        progress = st.progress(0, text="Processing video...")
-        frame_count = 0
-        all_labels = defaultdict(int)
-        track_ids_seen = set()
-        processing_times = []
-
-        while True:
-            ret, frame = cap.read()
-            if not ret:
-                break
-
-            t0 = time.time()
-            if tracking:
-                results = model.track(frame, conf=conf, iou=iou, persist=True, verbose=False)[0]
+    suggestions = [
+        "What is machine learning?",
+        "Explain deep learning",
+        "What is a neural network?",
+        "What is overfitting?",
+        "How does YOLO work?",
+    ]
+    cols = st.columns(len(suggestions))
+    for i, sug in enumerate(suggestions):
+        if cols[i].button(sug, key=f"sug_{i}", use_container_width=True):
+            st.session_state.messages.append({"role": "user", "content": sug})
+            answer, score, matched_q = get_answer(sug)
+            if answer:
+                st.session_state.messages.append({
+                    "role": "bot", "content": answer,
+                    "score": score, "matched": matched_q
+                })
             else:
-                results = model(frame, conf=conf, iou=iou, verbose=False)[0]
+                st.session_state.messages.append({
+                    "role": "bot",
+                    "content": "I couldn't find a confident match. Try rephrasing your question.",
+                    "score": score, "matched": None
+                })
+            st.rerun()
 
-            processing_times.append(time.time() - t0)
-            annotated = frame.copy()
-
-            for box in results.boxes:
-                cls_id = int(box.cls[0])
-                label = model.names[cls_id]
-                confidence = float(box.conf[0])
-                x1, y1, x2, y2 = map(int, box.xyxy[0])
-                color = tuple(int(c) for c in COLORS[cls_id % 80])
-                track_id = None
-
-                if tracking and box.id is not None:
-                    track_id = int(box.id[0])
-                    track_ids_seen.add(track_id)
-
-                cv2.rectangle(annotated, (x1, y1), (x2, y2), color, 2)
-                all_labels[label] += 1
-
-                if show_labels:
-                    text = label
-                    if show_conf:
-                        text += f" {confidence:.0%}"
-                    if track_id is not None:
-                        text += f" #{track_id}"
-                    (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
-                    cv2.rectangle(annotated, (x1, y1 - th - 8), (x1 + tw + 4, y1), color, -1)
-                    cv2.putText(annotated, text, (x1 + 2, y1 - 4),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-
-            out.write(annotated)
-            frame_count += 1
-            progress.progress(frame_count / max(total_frames, 1),
-                              text=f"Processing frame {frame_count}/{total_frames}...")
-
-        cap.release()
-        out.release()
-        avg_fps = 1 / np.mean(processing_times) if processing_times else 0
-
-        return out_path, dict(all_labels), len(track_ids_seen), avg_fps, frame_count
-
-    # ─── Image Mode ───────────────────────────────────────────────────────────
-    if "🖼️ Image" in input_mode:
-        uploaded_img = st.file_uploader("Upload an image", type=["jpg", "jpeg", "png", "bmp", "webp"])
-
-        if uploaded_img:
-            file_bytes = np.asarray(bytearray(uploaded_img.read()), dtype=np.uint8)
-            img = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
-            img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-
-            with st.spinner("Running YOLOv8 detection..."):
-                annotated_rgb, detections = process_image(img_rgb, conf_threshold, iou_threshold)
-
-            st.image(annotated_rgb, caption="Detected Objects", use_container_width=True)
-
-            if detections:
-                label_counts = defaultdict(int)
-                for d in detections:
-                    label_counts[d["label"]] += 1
-
-                st.markdown(f"""
-                <div class="metrics-row">
-                    <div class="metric-card">
-                        <div class="metric-val">{len(detections)}</div>
-                        <div class="metric-lbl">Objects Found</div>
-                    </div>
-                    <div class="metric-card">
-                        <div class="metric-val">{len(label_counts)}</div>
-                        <div class="metric-lbl">Unique Classes</div>
-                    </div>
-                    <div class="metric-card">
-                        <div class="metric-val">{max(d['confidence'] for d in detections):.0%}</div>
-                        <div class="metric-lbl">Best Confidence</div>
-                    </div>
-                </div>
-                """, unsafe_allow_html=True)
-
-                tags_html = "".join(
-                    f'<span class="obj-tag">{lbl} ×{cnt}</span>'
-                    for lbl, cnt in sorted(label_counts.items(), key=lambda x: -x[1])
-                )
-                st.markdown(f'<div style="margin-bottom:1rem">{tags_html}</div>', unsafe_allow_html=True)
-            else:
-                st.info("No objects detected. Try lowering the confidence threshold.")
-
-    # ─── Video Mode ───────────────────────────────────────────────────────────
+# ─── Chat History ─────────────────────────────────────────────────────────────
+for msg in st.session_state.messages:
+    if msg["role"] == "user":
+        st.markdown(f"""
+        <div class="msg-user">
+            <div class="bubble-user">{msg['content']}</div>
+            <div class="avatar-user">👤</div>
+        </div>
+        """, unsafe_allow_html=True)
     else:
-        uploaded_vid = st.file_uploader("Upload a video", type=["mp4", "avi", "mov", "mkv"])
+        conf_pct = int(msg.get('score', 0) * 100)
+        bar_width = min(conf_pct * 1.5, 100)
+        matched_text = f"Matched: <em>{msg.get('matched', '')}</em>" if msg.get('matched') else ""
+        low_conf_html = ""
+        if msg.get('score', 1) < 0.3 and msg.get('matched'):
+            low_conf_html = '<div class="low-conf">⚠️ Low confidence match — consider rephrasing</div>'
 
-        if uploaded_vid:
-            tfile = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
-            tfile.write(uploaded_vid.read())
-            tfile.flush()
-
-            st.video(tfile.name)
-            st.markdown("<br>", unsafe_allow_html=True)
-
-            if st.button("🚀 Run Detection & Tracking", type="primary", use_container_width=True):
-                out_path, label_counts, unique_ids, avg_fps, total_frames = process_video(
-                    tfile.name, conf_threshold, iou_threshold, enable_tracking
-                )
-
-                st.success("✅ Processing complete!")
-
-                st.markdown(f"""
-                <div class="metrics-row">
-                    <div class="metric-card">
-                        <div class="metric-val">{sum(label_counts.values())}</div>
-                        <div class="metric-lbl">Total Detections</div>
-                    </div>
-                    <div class="metric-card">
-                        <div class="metric-val">{len(label_counts)}</div>
-                        <div class="metric-lbl">Unique Classes</div>
-                    </div>
-                    <div class="metric-card">
-                        <div class="metric-val">{unique_ids}</div>
-                        <div class="metric-lbl">Tracked IDs</div>
-                    </div>
-                    <div class="metric-card">
-                        <div class="metric-val">{avg_fps:.1f}</div>
-                        <div class="metric-lbl">FPS (avg)</div>
-                    </div>
-                    <div class="metric-card">
-                        <div class="metric-val">{total_frames}</div>
-                        <div class="metric-lbl">Frames</div>
-                    </div>
+        st.markdown(f"""
+        <div class="msg-bot">
+            <div class="avatar-bot">🤖</div>
+            <div class="bubble-bot">
+                {msg['content']}
+                {low_conf_html}
+                <div class="confidence-bar">
+                    Confidence <span class="conf-fill" style="width:{bar_width}px"></span> {conf_pct}%
+                    &nbsp;·&nbsp; {matched_text}
                 </div>
-                """, unsafe_allow_html=True)
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
 
-                tags_html = "".join(
-                    f'<span class="obj-tag">{lbl} ×{cnt}</span>'
-                    for lbl, cnt in sorted(label_counts.items(), key=lambda x: -x[1])
-                )
-                st.markdown(f'<div style="margin-bottom:1rem">{tags_html}</div>', unsafe_allow_html=True)
+# ─── Input ────────────────────────────────────────────────────────────────────
+st.markdown("<div style='height:0.8rem'></div>", unsafe_allow_html=True)
+col_in, col_send = st.columns([5, 1])
+with col_in:
+    user_input = st.text_input(
+        "",
+        placeholder="Ask me anything about AI, ML, Deep Learning...",
+        key=f"user_input_{st.session_state.input_key}",
+        label_visibility="collapsed"
+    )
+with col_send:
+    send = st.button("Send ➤", use_container_width=True, type="primary")
 
-                with open(out_path, "rb") as f:
-                    st.download_button(
-                        "⬇️ Download Annotated Video",
-                        data=f,
-                        file_name="detected_output.mp4",
-                        mime="video/mp4",
-                        use_container_width=True
-                    )
+if send and user_input.strip():
+    st.session_state.messages.append({"role": "user", "content": user_input.strip()})
+    with st.spinner("Thinking..."):
+        time.sleep(0.3)
+        answer, score, matched_q = get_answer(user_input.strip())
+    if answer:
+        st.session_state.messages.append({
+            "role": "bot", "content": answer,
+            "score": score, "matched": matched_q
+        })
+    else:
+        st.session_state.messages.append({
+            "role": "bot",
+            "content": "I'm not confident about that one. Please try rephrasing or ask something else about AI/ML.",
+            "score": score, "matched": None
+        })
+    st.session_state.input_key += 1
+    st.rerun()
 
-                os.unlink(tfile.name)
-                os.unlink(out_path)
+# ─── Clear Chat ───────────────────────────────────────────────────────────────
+if st.session_state.messages:
+    if st.button("🗑️ Clear Chat", use_container_width=False):
+        st.session_state.messages = []
+        st.session_state.input_key += 1
+        st.rerun()
 
 # ─── Footer ───────────────────────────────────────────────────────────────────
 st.markdown("""
 <div class="footer">
-    Built with ❤️ by Navya · CodeAlpha AI Internship · Task 4 — Object Detection & Tracking · YOLOv8 + OpenCV
+    Built with ❤️ by Navya · CodeAlpha AI Internship · Task 2 — FAQ Chatbot · NLP + Cosine Similarity
 </div>
 """, unsafe_allow_html=True)
